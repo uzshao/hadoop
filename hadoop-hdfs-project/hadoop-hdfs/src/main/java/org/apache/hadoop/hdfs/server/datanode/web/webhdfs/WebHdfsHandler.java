@@ -34,7 +34,6 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.CreateFlag;
 import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
-import org.apache.hadoop.fs.ParentNotDirectoryException;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
@@ -43,6 +42,7 @@ import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifie
 import org.apache.hadoop.hdfs.web.JsonUtil;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
 import org.apache.hadoop.hdfs.web.resources.GetOpParam;
+import org.apache.hadoop.hdfs.web.resources.HTraceSpanIdParam;
 import org.apache.hadoop.hdfs.web.resources.PostOpParam;
 import org.apache.hadoop.hdfs.web.resources.PutOpParam;
 import org.apache.hadoop.hdfs.web.resources.UserParam;
@@ -50,6 +50,9 @@ import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.LimitInputStream;
+import org.apache.htrace.core.SpanId;
+import org.apache.htrace.core.TraceScope;
+import org.apache.htrace.core.Tracer;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -61,19 +64,14 @@ import java.nio.charset.StandardCharsets;
 import java.security.PrivilegedExceptionAction;
 import java.util.EnumSet;
 
-import static io.netty.handler.codec.http.HttpHeaders.Names.ACCEPT;
-import static io.netty.handler.codec.http.HttpHeaders.Names.ACCESS_CONTROL_ALLOW_HEADERS;
 import static io.netty.handler.codec.http.HttpHeaders.Names.ACCESS_CONTROL_ALLOW_METHODS;
 import static io.netty.handler.codec.http.HttpHeaders.Names.ACCESS_CONTROL_ALLOW_ORIGIN;
-import static io.netty.handler.codec.http.HttpHeaders.Names.ACCESS_CONTROL_MAX_AGE;
 import static io.netty.handler.codec.http.HttpHeaders.Names.CONNECTION;
 import static io.netty.handler.codec.http.HttpHeaders.Names.CONTENT_LENGTH;
 import static io.netty.handler.codec.http.HttpHeaders.Names.CONTENT_TYPE;
 import static io.netty.handler.codec.http.HttpHeaders.Names.LOCATION;
 import static io.netty.handler.codec.http.HttpHeaders.Values.CLOSE;
-import static io.netty.handler.codec.http.HttpHeaders.Values.KEEP_ALIVE;
 import static io.netty.handler.codec.http.HttpMethod.GET;
-import static io.netty.handler.codec.http.HttpMethod.OPTIONS;
 import static io.netty.handler.codec.http.HttpMethod.POST;
 import static io.netty.handler.codec.http.HttpMethod.PUT;
 import static io.netty.handler.codec.http.HttpResponseStatus.CONTINUE;
@@ -99,15 +97,18 @@ public class WebHdfsHandler extends SimpleChannelInboundHandler<HttpRequest> {
 
   private final Configuration conf;
   private final Configuration confForCreate;
+  private Tracer tracer;
 
   private String path;
   private ParameterParser params;
   private UserGroupInformation ugi;
   private DefaultHttpResponse resp = null;
 
-  public WebHdfsHandler(Configuration conf, Configuration confForCreate)
+  public WebHdfsHandler(Configuration conf, Configuration confForCreate,
+                        Tracer tracer)
     throws IOException {
     this.conf = conf;
+    this.tracer = tracer;
     this.confForCreate = confForCreate;
     /** set user pattern based on configuration file */
     UserParam.setUserPattern(
@@ -115,8 +116,41 @@ public class WebHdfsHandler extends SimpleChannelInboundHandler<HttpRequest> {
                     DFSConfigKeys.DFS_WEBHDFS_USER_PATTERN_DEFAULT));
   }
 
+  /**
+   * This function parses the HTraceSpanId from the HttpRequest Header
+   * and returns the SpanId if exists, or null otherwise.
+   */
+  static SpanId getSpanIdFromRequest(final HttpRequest req) {
+    HttpHeaders headers = req.headers();
+    String spanIdStr = headers.get(HTraceSpanIdParam.NAME);
+    if (spanIdStr != null) {
+      try {
+        /** See similar code from
+         * {@link org.apache.hadoop.ipc.Server.Connection#processRpcRequest} */
+        return SpanId.fromString(spanIdStr);
+      } catch (RuntimeException e) {
+        LOG.warn("cannot parse HTTP Request Header " + HTraceSpanIdParam.NAME
+                + ": " + spanIdStr, e);
+      }
+    }
+    return null;
+  }
+
   @Override
   public void channelRead0(final ChannelHandlerContext ctx,
+                           final HttpRequest req) throws Exception {
+    // Start a traceScope if there is one passed from the HTTP Request.
+    SpanId spanId = getSpanIdFromRequest(req);
+    try (TraceScope traceScope = spanId == null ? null
+            : tracer.newScope("webhdfs.WebHdfsHandler#channelRead0", spanId)) {
+      if (traceScope != null) {
+        traceScope.addKVAnnotation("URL", req.getUri().toString());
+      }
+      channelRead0Internal(ctx, req);
+    }
+  }
+
+  private void channelRead0Internal(final ChannelHandlerContext ctx,
                            final HttpRequest req) throws Exception {
     Preconditions.checkArgument(req.getUri().startsWith(WEBHDFS_PREFIX));
     QueryStringDecoder queryString = new QueryStringDecoder(req.getUri());
@@ -124,7 +158,6 @@ public class WebHdfsHandler extends SimpleChannelInboundHandler<HttpRequest> {
     DataNodeUGIProvider ugiProvider = new DataNodeUGIProvider(params);
     ugi = ugiProvider.ugi();
     path = params.path();
-
     injectToken();
     ugi.doAs(new PrivilegedExceptionAction<Void>() {
       @Override
@@ -159,10 +192,14 @@ public class WebHdfsHandler extends SimpleChannelInboundHandler<HttpRequest> {
     HttpMethod method = req.getMethod();
     if (PutOpParam.Op.CREATE.name().equalsIgnoreCase(op)
       && method == PUT) {
-      onCreate(ctx);
+      // onCreate will insert HdfsWriter into the pipeline, which needs
+      // the HTrace SpanID from the request to continue tracing.
+      onCreate(ctx, getSpanIdFromRequest(req));
     } else if (PostOpParam.Op.APPEND.name().equalsIgnoreCase(op)
       && method == POST) {
-      onAppend(ctx);
+      // onCreate will insert HdfsWriter into the pipeline, which needs
+      // the HTrace SpanID from the request to continue tracing.
+      onAppend(ctx, getSpanIdFromRequest(req));
     } else if (GetOpParam.Op.OPEN.name().equalsIgnoreCase(op)
       && method == GET) {
       onOpen(ctx);
@@ -182,7 +219,9 @@ public class WebHdfsHandler extends SimpleChannelInboundHandler<HttpRequest> {
     ctx.writeAndFlush(resp).addListener(ChannelFutureListener.CLOSE);
   }
 
-  private void onCreate(ChannelHandlerContext ctx)
+  // onCreate will insert HdfsWriter into the pipeline, which needs
+  // the HTrace SpanID from the request to continue tracing.
+  private void onCreate(ChannelHandlerContext ctx, SpanId spanId)
     throws IOException, URISyntaxException {
     writeContinueHeader(ctx);
 
@@ -215,10 +254,12 @@ public class WebHdfsHandler extends SimpleChannelInboundHandler<HttpRequest> {
     resp.headers().set(LOCATION, uri.toString());
     resp.headers().set(CONTENT_LENGTH, 0);
     ctx.pipeline().replace(this, HdfsWriter.class.getSimpleName(),
-      new HdfsWriter(dfsClient, out, resp));
+      new HdfsWriter(dfsClient, out, resp, tracer, spanId));
   }
 
-  private void onAppend(ChannelHandlerContext ctx) throws IOException {
+  // onAppend will insert HdfsWriter into the pipeline, which needs
+  // the HTrace SpanID from the request to continue tracing.
+  private void onAppend(ChannelHandlerContext ctx, SpanId spanId) throws IOException {
     writeContinueHeader(ctx);
     final String nnId = params.namenodeId();
     final int bufferSize = params.bufferSize();
@@ -229,7 +270,7 @@ public class WebHdfsHandler extends SimpleChannelInboundHandler<HttpRequest> {
     resp = new DefaultHttpResponse(HTTP_1_1, OK);
     resp.headers().set(CONTENT_LENGTH, 0);
     ctx.pipeline().replace(this, HdfsWriter.class.getSimpleName(),
-      new HdfsWriter(dfsClient, out, resp));
+      new HdfsWriter(dfsClient, out, resp, tracer, spanId));
   }
 
   private void onOpen(ChannelHandlerContext ctx) throws IOException {

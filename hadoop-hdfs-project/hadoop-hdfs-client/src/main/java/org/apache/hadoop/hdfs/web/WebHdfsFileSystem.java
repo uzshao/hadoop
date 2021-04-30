@@ -63,6 +63,7 @@ import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FSInputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FsTracer;
 import org.apache.hadoop.fs.GlobalStorageStatistics;
 import org.apache.hadoop.fs.GlobalStorageStatistics.StorageStatisticsProvider;
 import org.apache.hadoop.fs.StorageStatistics;
@@ -103,6 +104,9 @@ import org.apache.hadoop.security.token.TokenSelector;
 import org.apache.hadoop.security.token.delegation.AbstractDelegationTokenSelector;
 import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.StringUtils;
+import org.apache.htrace.core.Span;
+import org.apache.htrace.core.TraceScope;
+import org.apache.htrace.core.Tracer;
 import org.codehaus.jackson.map.ObjectMapper;
 import org.codehaus.jackson.map.ObjectReader;
 import org.slf4j.Logger;
@@ -123,6 +127,8 @@ public class WebHdfsFileSystem extends FileSystem
   /** Http URI: http://namenode:port/{PATH_PREFIX}/path/to/file */
   public static final String PATH_PREFIX = "/" + WebHdfsConstants.WEBHDFS_SCHEME
       + "/v" + VERSION;
+
+  private Tracer tracer;
 
   /**
    * Default connection factory may be overridden in tests to use smaller
@@ -179,6 +185,8 @@ public class WebHdfsFileSystem extends FileSystem
   public synchronized void initialize(URI uri, Configuration conf
   ) throws IOException {
     super.initialize(uri, conf);
+    /** Enabling htrace for web hdfs operations */
+    this.tracer = FsTracer.get(conf);
     setConf(conf);
     /** set user pattern based on configuration file */
     UserParam.setUserPattern(conf.get(
@@ -695,6 +703,15 @@ public class WebHdfsFileSystem extends FileSystem
         // The value of the header is unimportant.  Only its presence matters.
         conn.setRequestProperty(restCsrfCustomHeader, "\"\"");
       }
+
+      /** See reference code from {@link org.apache.hadoop.util.ProtoUtil#makeRpcRequestHeader}
+       */
+      // If we are currently tracing, add tracing SpanID to the HTTP Header
+      Span span = Tracer.getCurrentSpan();
+      if (span != null) {
+        conn.setRequestProperty(HTraceSpanIdParam.NAME, span.getSpanId().toString());
+      }
+
       switch (op.getType()) {
       // if not sending a message body for a POST or PUT operation, need
       // to ensure the server/proxy knows this
@@ -740,7 +757,9 @@ public class WebHdfsFileSystem extends FileSystem
       for(int retry = 0; ; retry++) {
         checkRetry = !redirected;
         final URL url = getUrl();
-        try {
+        try(TraceScope scope = tracer.newScope(
+                "WebHdfsFileSystem.AbstractRunner#runWithRetry[" + op + "]")) {
+          scope.addKVAnnotation("url", url.toString());
           final HttpURLConnection conn = connect(url);
           // output streams will validate on close
           if (!op.getDoOutput()) {
@@ -936,24 +955,26 @@ public class WebHdfsFileSystem extends FileSystem
     @Override
     FSDataOutputStream getResponse(final HttpURLConnection conn)
         throws IOException {
-      return new FSDataOutputStream(new BufferedOutputStream(
-          conn.getOutputStream(), bufferSize), statistics) {
-        @Override
-        public void close() throws IOException {
-          try {
-            super.close();
-          } finally {
-            try {
-              validateResponse(op, conn, true);
-            } finally {
-              // This is a connection to DataNode.  Let's disconnect since
-              // there is little chance that the connection will be reused
-              // any time soonl
-              conn.disconnect();
+        return new FSDataOutputStream(new BufferedOutputStream(
+                conn.getOutputStream(), bufferSize), statistics) {
+          @Override
+          public void close() throws IOException {
+            try (TraceScope scope = tracer.newScope("WebHdfsFileSystem.FsPathOutputStreamRunner#getResponse")) {
+              try {
+                super.close();
+              } finally {
+                try {
+                  validateResponse(op, conn, true);
+                } finally {
+                  // This is a connection to DataNode.  Let's disconnect since
+                  // there is little chance that the connection will be reused
+                  // any time soonl
+                  conn.disconnect();
+                }
+              }
             }
           }
-        }
-      };
+        };
     }
   }
 
@@ -1329,6 +1350,15 @@ public class WebHdfsFileSystem extends FileSystem
   public FSDataOutputStream create(final Path f, final FsPermission permission,
       final boolean overwrite, final int bufferSize, final short replication,
       final long blockSize, final Progressable progress) throws IOException {
+    try (TraceScope scope = tracer.newScope("WebHdfsFileSystem#create")) {
+      return createInternal(f, permission, overwrite, bufferSize, replication,
+              blockSize, progress);
+    }
+  }
+
+  protected FSDataOutputStream createInternal(final Path f, final FsPermission permission,
+                                   final boolean overwrite, final int bufferSize, final short replication,
+                                   final long blockSize, final Progressable progress) throws IOException {
     statistics.incrementWriteOps(1);
     storageStatistics.incrementOpCounter(OpType.CREATE);
 
@@ -1347,6 +1377,16 @@ public class WebHdfsFileSystem extends FileSystem
       final FsPermission permission, final EnumSet<CreateFlag> flag,
       final int bufferSize, final short replication, final long blockSize,
       final Progressable progress) throws IOException {
+    try (TraceScope scope = tracer.newScope("WebHdfsFileSystem#createNonRecursive")) {
+      return createNonRecursiveInternal(f, permission, flag, bufferSize, replication,
+              blockSize, progress);
+    }
+  }
+
+  protected FSDataOutputStream createNonRecursiveInternal(
+          final Path f, final FsPermission permission, final EnumSet<CreateFlag> flag,
+          final int bufferSize, final short replication, final long blockSize,
+          final Progressable progress) throws IOException {
     statistics.incrementWriteOps(1);
     storageStatistics.incrementOpCounter(OpType.CREATE_NON_RECURSIVE);
 
@@ -1394,6 +1434,13 @@ public class WebHdfsFileSystem extends FileSystem
 
   @Override
   public FSDataInputStream open(final Path f, final int bufferSize
+  ) throws IOException {
+    try (TraceScope scope = tracer.newScope("WebHdfsFileSystem#open")) {
+      return openInternal(f, bufferSize);
+    }
+  }
+
+  protected FSDataInputStream openInternal(final Path f, final int bufferSize
   ) throws IOException {
     statistics.incrementReadOps(1);
     storageStatistics.incrementOpCounter(OpType.OPEN);

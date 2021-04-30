@@ -23,6 +23,7 @@ import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.handler.codec.http.HttpRequest;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hdfs.server.datanode.web.webhdfs.WebHdfsHandler;
+import org.apache.htrace.core.Tracer;
 
 import java.net.InetSocketAddress;
 
@@ -32,12 +33,14 @@ class URLDispatcher extends SimpleChannelInboundHandler<HttpRequest> {
   private final InetSocketAddress proxyHost;
   private final Configuration conf;
   private final Configuration confForCreate;
+  private final Tracer tracer;
 
   URLDispatcher(InetSocketAddress proxyHost, Configuration conf,
-                Configuration confForCreate) {
+                Configuration confForCreate, Tracer tracer) {
     this.proxyHost = proxyHost;
     this.conf = conf;
     this.confForCreate = confForCreate;
+    this.tracer = tracer;
   }
 
   @Override
@@ -46,7 +49,7 @@ class URLDispatcher extends SimpleChannelInboundHandler<HttpRequest> {
     String uri = req.getUri();
     ChannelPipeline p = ctx.pipeline();
     if (uri.startsWith(WEBHDFS_PREFIX)) {
-      WebHdfsHandler h = new WebHdfsHandler(conf, confForCreate);
+      WebHdfsHandler h = new WebHdfsHandler(conf, confForCreate, tracer);
       p.replace(this, WebHdfsHandler.class.getSimpleName(), h);
       h.channelRead0(ctx, req);
     } else {

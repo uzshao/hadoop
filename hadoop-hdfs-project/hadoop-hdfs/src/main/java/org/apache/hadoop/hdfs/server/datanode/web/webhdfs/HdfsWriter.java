@@ -26,6 +26,9 @@ import io.netty.handler.codec.http.LastHttpContent;
 import org.apache.commons.logging.Log;
 import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.htrace.core.SpanId;
+import org.apache.htrace.core.TraceScope;
+import org.apache.htrace.core.Tracer;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -38,11 +41,16 @@ class HdfsWriter extends SimpleChannelInboundHandler<HttpContent> {
   private final OutputStream out;
   private final DefaultHttpResponse response;
   private static final Log LOG = WebHdfsHandler.LOG;
+  private final Tracer tracer;
+  private final SpanId spanId;
 
-  HdfsWriter(DFSClient client, OutputStream out, DefaultHttpResponse response) {
+  HdfsWriter(DFSClient client, OutputStream out, DefaultHttpResponse response,
+             Tracer tracer, SpanId spanId) {
     this.client = client;
     this.out = out;
     this.response = response;
+    this.tracer = tracer;
+    this.spanId = spanId;
   }
 
   @Override
@@ -53,6 +61,14 @@ class HdfsWriter extends SimpleChannelInboundHandler<HttpContent> {
   @Override
   protected void channelRead0(ChannelHandlerContext ctx, HttpContent chunk)
     throws IOException {
+    try (TraceScope traceScope = spanId == null ? null
+            : tracer.newScope("webhdfs.HdfsWriter#channelRead0", spanId)) {
+      channelRead0Internal(ctx, chunk);
+    }
+  }
+
+  private void channelRead0Internal(ChannelHandlerContext ctx, HttpContent chunk)
+          throws IOException {
     chunk.content().readBytes(out, chunk.content().readableBytes());
     if (chunk instanceof LastHttpContent) {
       try {

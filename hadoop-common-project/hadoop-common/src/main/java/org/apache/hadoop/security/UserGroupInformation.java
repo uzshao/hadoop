@@ -74,9 +74,13 @@ import org.apache.hadoop.security.SaslRpcServer.AuthMethod;
 import org.apache.hadoop.security.authentication.util.KerberosUtil;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
+import org.apache.hadoop.tracing.TraceUtils;
 import org.apache.hadoop.util.Shell;
 import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.Time;
+import org.apache.htrace.core.Span;
+import org.apache.htrace.core.TraceScope;
+import org.apache.htrace.core.Tracer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1102,13 +1106,27 @@ public class UserGroupInformation {
     LOG.info("Logout successful for user " + keytabPrincipal
         + " using keytab file " + keytabFile);
   }
-  
+
   /**
    * Re-login a user from keytab if TGT is expired or is close to expiry.
-   * 
+   * This function is a tracing wrapper.  The actual logic is inside the
+   * doCheckTGTAndReloginFromKeytab function.
+   *
    * @throws IOException
    */
   public synchronized void checkTGTAndReloginFromKeytab() throws IOException {
+    try (TraceScope scope = TraceUtils.newTraceScope(
+            "UserGroupInformation#checkTGTAndReloginFromKeytab")) {
+      doCheckTGTAndReloginFromKeytab();
+    }
+  }
+
+  /**
+   * Re-login a user from keytab if TGT is expired or is close to expiry.
+   *
+   * @throws IOException
+   */
+  private void doCheckTGTAndReloginFromKeytab() throws IOException {
     if (!isSecurityEnabled()
         || user.getAuthenticationMethod() != AuthenticationMethod.KERBEROS
         || !isKeytab)

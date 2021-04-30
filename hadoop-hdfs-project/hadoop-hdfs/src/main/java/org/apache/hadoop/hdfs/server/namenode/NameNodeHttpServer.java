@@ -48,6 +48,7 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.http.RestCsrfPreventionFilter;
+import org.apache.htrace.core.Tracer;
 
 /**
  * Encapsulates the HTTP server started by the NameNode. 
@@ -57,6 +58,7 @@ public class NameNodeHttpServer {
   private HttpServer2 httpServer;
   private final Configuration conf;
   private final NameNode nn;
+  private final Tracer tracer;
   
   private InetSocketAddress httpAddress;
   private InetSocketAddress httpsAddress;
@@ -72,6 +74,7 @@ public class NameNodeHttpServer {
     this.conf = conf;
     this.nn = nn;
     this.bindAddress = bindAddress;
+    this.tracer = (nn == null ? null : nn.tracer);
   }
 
   private void initWebHdfs(Configuration conf) throws IOException {

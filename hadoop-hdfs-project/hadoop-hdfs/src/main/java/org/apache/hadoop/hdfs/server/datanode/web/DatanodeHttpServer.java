@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hdfs.server.datanode.web;
 
+import static org.apache.hadoop.fs.CommonConfigurationKeys.FS_CLIENT_HTRACE_PREFIX;
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_WEBHDFS_REST_CSRF_ENABLED_DEFAULT;
 import static org.apache.hadoop.hdfs.client.HdfsClientConfigKeys.DFS_WEBHDFS_REST_CSRF_ENABLED_KEY;
 
@@ -44,6 +45,7 @@ import io.netty.handler.stream.ChunkedWriteHandler;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSUtil;
@@ -59,6 +61,7 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.security.http.RestCsrfPreventionFilter;
 import org.apache.hadoop.security.ssl.SSLFactory;
+import org.apache.htrace.core.Tracer;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -90,12 +93,15 @@ public class DatanodeHttpServer implements Closeable {
   private InetSocketAddress httpsAddress;
   static final Log LOG = LogFactory.getLog(DatanodeHttpServer.class);
 
+  private final Tracer tracer;
+
   public DatanodeHttpServer(final Configuration conf,
       final DataNode datanode,
       final ServerSocketChannel externalHttpChannel)
     throws IOException {
     this.restCsrfPreventionFilter = createRestCsrfPreventionFilter(conf);
     this.conf = conf;
+    this.tracer = datanode.getTracer();
 
     Configuration confForInfoServer = new Configuration(conf);
     confForInfoServer.setInt(HttpServer2.HTTP_MAX_THREADS, 10);
@@ -153,7 +159,7 @@ public class DatanodeHttpServer implements Closeable {
           }
           p.addLast(
               new ChunkedWriteHandler(),
-              new URLDispatcher(jettyAddr, conf, confForCreate));
+              new URLDispatcher(jettyAddr, conf, confForCreate, tracer));
         }
       });
 
@@ -210,7 +216,7 @@ public class DatanodeHttpServer implements Closeable {
             }
             p.addLast(
                 new ChunkedWriteHandler(),
-                new URLDispatcher(jettyAddr, conf, confForCreate));
+                new URLDispatcher(jettyAddr, conf, confForCreate, tracer));
           }
         });
     } else {

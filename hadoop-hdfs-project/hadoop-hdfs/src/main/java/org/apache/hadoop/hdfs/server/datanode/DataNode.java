@@ -297,7 +297,7 @@ public class DataNode extends ReconfigurableBase
 
   public static final Log METRICS_LOG = LogFactory.getLog("DataNodeMetricsLog");
 
-  private static final String DATANODE_HTRACE_PREFIX = "datanode.htrace.";
+  public static final String DATANODE_HTRACE_PREFIX = "datanode.htrace.";
 
   /**
    * Use {@link NetUtils#createSocketAddr(String)} instead.
@@ -393,6 +393,13 @@ public class DataNode extends ReconfigurableBase
   private long[] oobTimeouts; /** timeout value of each OOB type */
 
   private ScheduledThreadPoolExecutor metricsLoggerTimer;
+
+  /**
+   * Used by DatanodeHttpServer to get the tracer
+   */
+  public Tracer getTracer() {
+    return tracer;
+  }
 
   /**
    * Creates a dummy DataNode for testing purpose.

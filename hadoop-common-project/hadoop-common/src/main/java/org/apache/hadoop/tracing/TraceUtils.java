@@ -25,6 +25,8 @@ import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.tracing.SpanReceiverInfo.ConfigurationPair;
 import org.apache.htrace.core.HTraceConfiguration;
+import org.apache.htrace.core.TraceScope;
+import org.apache.htrace.core.Tracer;
 
 /**
  * This class provides utility functions for tracing.
@@ -71,5 +73,17 @@ public class TraceUtils {
         return conf.get(key);
       }
     };
+  }
+
+  /**
+   * Returns tracer.newScope(...) if current thread has an associated tracer,
+   * or null otherwise.
+   */
+  public static TraceScope newTraceScope(String description) {
+    Tracer tracer = Tracer.curThreadTracer();
+    if (tracer == null) {
+      return null;
+    }
+    return tracer.newScope(description);
   }
 }
